@@ -1,0 +1,131 @@
+close all
+clear
+
+[s, Fs]=audioread("a.wav");
+ordine_lpc=50;
+
+
+
+%% Estrazioene coefficienti
+%finestra temporale
+dur_sec = 0.3;  % durata in secondi
+dur_sample = dur_sec * Fs;  % durata in campioni
+sound(s,Fs)
+pause(5)
+
+windows=floor(length(s)/dur_sample);
+
+
+%vettore dei coefficienti da trasmettere
+info=zeros(1,(2+ordine_lpc)*windows);
+
+for i=0:1:(windows-1)
+    %estrazione dei vari coefficienti
+    window = s(1+(i*dur_sample):dur_sample+(i*dur_sample),1);
+    [a_hat, pitch_lag, pwr]=Scomposizione_LPC(window,Fs,ordine_lpc);
+
+
+    %riempimento del vettore info
+    info(1,1+i*(2+ordine_lpc))=pitch_lag;
+    info(1,2+i*(2+ordine_lpc))=pwr;
+    for j=3:1:(2+ordine_lpc)
+        info(1,j+i*(2+ordine_lpc))=a_hat(j-2);
+    end
+end
+
+%aggiungo al vettore info la lunghezza in campioni del vettore originale
+info=[length(window)*windows,windows,info];
+
+
+%% Conversione in binario
+dataIn=float2bin(info);
+
+%% Invio su canale immaginario tramite QPSK
+
+%parametri di trasmissione
+M=4;             %ordine della modulazione
+k=log2(M);        %bit per simbolo
+n=size(dataIn);   %numero di bit da processare
+sps=3;            %OutputSamplesPerSymbol per il trasmettitore (e inputSamples per il ricevitore)
+C=10;            %durata del filtro in simboli
+alpha=0.5;        %fattore di roll-off
+
+%definizione del filtro a coseno rialzato tx
+txfilter = comm.RaisedCosineTransmitFilter(...
+    'RolloffFactor', alpha, ...
+    'FilterSpanInSymbols', C, ...
+    'OutputSamplesPerSymbol', sps);
+
+%conversione dati
+dataSymbolsIn=bit2int(dataIn,k);
+
+%modulazione
+dataModG=pskmod(dataSymbolsIn,M);      %gray
+
+%filtraggio in trasmissione
+FdataModG=txfilter(dataModG);
+
+%simulazione di canale
+EbN0=30;
+snr=EbN0+10*log10(k)-10*log10(sps);
+
+%ricezione
+FreceivedSignalG=awgn(FdataModG,snr,'measured');
+
+%definizione filtro a coseno rialzato rx
+rxfilter = comm.RaisedCosineReceiveFilter(...
+    'RolloffFactor', alpha, ...
+    'FilterSpanInSymbols', C, ...
+    'InputSamplesPerSymbol', sps, ...
+    'DecimationFactor', sps);
+
+%filtraggio in ricezione
+receivedSignalG = rxfilter(FreceivedSignalG); %gray
+
+%grafico codifica Gray
+sPlotFigG=scatterplot(receivedSignalG,1,0,'y.');
+grid on
+hold on
+scatterplot(dataModG,1,0,'r*',sPlotFigG);
+
+%demodulazione
+dataSymbolsOutG=pskdemod(receivedSignalG,M);     %gray
+
+%conversione simboli
+dataOutG=int2bit(dataSymbolsOutG,k);
+dataOutG=circshift(dataOutG,-(10*k));
+
+%calcolo del bit error
+[numErrorsG,berG]=biterr(dataIn,dataOutG);
+fprintf('\nIl bit error con codifica di Gray è di %5.2e, basato su %d errori\n',berG,numErrorsG);
+
+%% Recupero dei coefficienti
+info_out=bin2float(dataOutG);
+
+%% Ricostruzione del segnale audio
+%vettore dei campioni ricostruiti
+s_synth=zeros(20000,1);
+window=(length(info_out)-2)/info_out(2);
+
+for i=0:1:info_out(2)-1
+    lag=info_out(3+i*(window));
+    pow=info_out(4+i*(window));
+    a_hat=zeros(window-2,1);
+
+    for j=1:1:(window-2)
+        a_hat(j)=info_out(1,2+(2+j)+i*(window));
+    end
+
+    samples=Sintesi_audio(a_hat,lag,pow,info_out(1));
+
+    for j=1:1:(info_out(1)/info_out(2))
+        if pow <= 0.04
+            s_synth(j+i*(info_out(1)/info_out(2)))=samples(j);
+        else
+            s_synth(j+i*(info_out(1)/info_out(2))) = 0;
+        end
+    end
+
+end
+
+sound(s_synth,Fs)
